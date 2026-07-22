@@ -1,8 +1,8 @@
 # Werewolf Game
 
-> **NOTE**: This project is still under active development. Please be aware of any bugs or system crashes that it may cause while experiementing it.
+> **NOTE**: This project is still under active development. Please be aware of any bugs or crashes that it may cause while experimenting with it.
 
-This is a Web-based game with LLM agents that simulates the social game called Werewolf or Mafia. It is built with LangChain, LangGraph and Streamlit.
+This is a Web-based game with LLM agents that simulates the social game called Werewolf or Mafia. It is built with LangChain, LangGraph, and Streamlit.
 
 ## How to run
 
