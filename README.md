@@ -16,7 +16,9 @@ uv venv
 
 2. Use `uv add <package>` to install the necessary packages.
 
-3. Run `Streamlit` with the cli below.
+3. Create a new `.env` environment file using a environment template `.env.example` and fill the `AGENT_LLM_MODEL` value with the LLM model name, such as _llama3.2_.
+
+4. Run `Streamlit` with the cli below.
 
 ```bash
 streamlit run streamlit_app.py
