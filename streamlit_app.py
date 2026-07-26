@@ -307,36 +307,25 @@ def render_pending_decision() -> None:
 
 
 @st.fragment(run_every="1s")
-def render_discussion(discussion: DiscussionCoordinator, human) -> None:
-    """Everything about the live discussion - the countdown, the message
-    list, and the human's input - lives in this ONE fragment, and all of
-    it refreshes together on the same 1-second cadence.
+def render_discussion(discussion: DiscussionCoordinator) -> None:
+    """The live discussion - countdown and message list - refreshes on a
+    1-second cadence. It doesn't drive the discussion forward: bots speak
+    on their own schedule in a background thread (see
+    application/discussion.py), so this only reads that shared state
+    (thread-safely, via `snapshot_transcript()`) and renders it.
 
-    Unlike the earlier tick-based version, this fragment doesn't drive
-    the discussion forward at all - bots are already speaking on their
-    own independent schedule in a background thread (see
-    application/discussion.py). This function's only job is to
-    periodically read that shared state (thread-safely, via
-    `snapshot_transcript()`) and render it, plus forward the human's
-    chat input into the same shared transcript.
+    The human's chat input deliberately does NOT live here: Streamlit only
+    pins an st.chat_input to the bottom of the viewport (its sticky
+    "bottom" block) when the call happens at the top level of the main
+    container with no ancestor blocks - inside this fragment it renders
+    inline and scrolls away with the content. It's called in render_game
+    instead.
     """
     st.subheader("Village discussion")
     st.caption(f"{int(discussion.time_remaining)}s remaining before the vote.")
     st.progress(
         min(1.0, max(0.0, discussion.time_remaining / discussion.budget_seconds))
     )
-
-    # Capture the human's input *before* rendering the message list below.
-    # st.chat_input always stays visually pinned to the bottom of the page
-    # regardless of where it's called in the code, so calling it here
-    # doesn't affect layout - but it does mean that if this particular
-    # fragment run was triggered by the human submitting a message, that
-    # message is already appended by the time we render the transcript,
-    # so it shows up immediately instead of waiting for the next tick.
-    if human.is_alive:
-        message = st.chat_input("Say something to the village...")
-        if message:
-            discussion.add_human_message(human.name, message)
 
     _render_transcript_messages(discussion)
 
@@ -476,7 +465,18 @@ def render_game() -> None:
     elif (
         engine.phase == GamePhase.DAY and st.session_state.get("discussion") is not None
     ):
-        render_discussion(st.session_state.discussion, human)
+        discussion = st.session_state.discussion
+        # Called at the top level of the main container on purpose: that's
+        # the only spot where Streamlit pins the input to its sticky
+        # bottom-of-viewport block, so it never scrolls out. It's also
+        # captured *before* rendering the transcript below, so a submitted
+        # message is appended before this same run renders the discussion -
+        # it shows up immediately instead of one rerun later.
+        if human.is_alive:
+            message = st.chat_input("Say something to the village...")
+            if message:
+                discussion.add_human_message(human.name, message)
+        render_discussion(discussion)
 
     if engine.result != GameResult.ONGOING:
         if engine.result == GameResult.VILLAGERS_WIN:
