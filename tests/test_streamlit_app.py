@@ -23,10 +23,10 @@ def rendered_content(at) -> str:
 
 def hidden_role_count(at) -> int:
     """How many living players currently have their role hidden - in either
-    roster rendering (list: '— ? —'; cards: '? · alive' in the card HTML).
+    roster rendering (list: '— ? —'; one-line cards: '· ? ·').
     """
     content = rendered_content(at)
-    return content.count("— ? —") + content.count("? · alive")
+    return content.count("— ? —") + content.count("· ? ·")
 
 
 class TestStreamlitApp(unittest.TestCase):
@@ -455,8 +455,12 @@ class TestDisplaySettings(unittest.TestCase):
 
     def test_roster_cards_have_distinct_avatars_per_player(self):
         at = self._start_game(num_players=6)
+        # One-line roster entries look like "👩 **Bob** · ? · 🟢" - the
+        # avatar is the first character of the line.
         avatars = {
-            m.value for m in at.markdown if m.value.startswith("## ")
+            m.value[0]
+            for m in at.markdown
+            if " · " in m.value and m.value[0] not in "*# "
         }
         # Whatever the roles/vision situation at game start, six players
         # with per-id avatars can never collapse to fewer than 3 distinct

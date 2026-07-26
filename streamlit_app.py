@@ -33,6 +33,62 @@ AGENT_LLM_MODEL = os.getenv("AGENT_LLM_MODEL")
 # players and revealed werewolves override this with ⚰️/🐺 in the roster.
 PLAYER_AVATARS = ["👨", "👩", "🧔", "👴", "👵", "🧓", "👱", "🧕"]
 
+# Layout-only CSS (see "Werewolf Game-UI Draft V1.drawio.png"): pins the
+# keyed roster container to the right edge and reserves space for it in the
+# main block. st.columns is deliberately NOT used for this - column blocks
+# interact badly with this app's fragment/rerun flow in Streamlit's AppTest
+# harness (stale widget nodes crash later runs), while plain containers are
+# fine. On narrow windows the panel falls back to normal flow.
+ROSTER_PANEL_CSS = """
+.st-key-roster_panel {
+    position: fixed;
+    top: 5rem;
+    right: 0.75rem;
+    /* Sized to content (with a ceiling) so every one-line player entry
+       fits fully - combined with white-space: nowrap below, nothing wraps
+       or clips. No max-height/overflow: the panel grows with its content
+       instead of scrolling. */
+    width: max-content;
+    max-width: 18rem;
+    z-index: 1000;
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    /* No background: the main block's padding-right reserves this gutter,
+       so nothing ever renders beneath the panel - a solid background would
+       just fight the active theme. The translucent border works on both
+       light and dark themes. */
+    border: 1px solid rgba(128, 128, 128, 0.35);
+}
+/* Compact the roster contents: tighter gaps, one line per player. */
+.st-key-roster_panel [data-testid="stVerticalBlock"] {
+    gap: 0.3rem;
+}
+.st-key-roster_panel h3 {
+    font-size: 1.15rem;
+    margin: 0;
+    padding: 0;
+}
+.st-key-roster_panel [data-testid="stMarkdownContainer"] p {
+    margin: 0;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    white-space: nowrap;
+}
+[data-testid="stMainBlockContainer"] {
+    padding-right: 17rem !important;
+}
+@media (max-width: 75rem) {
+    .st-key-roster_panel {
+        position: static;
+        width: auto;
+        max-width: none;
+    }
+    [data-testid="stMainBlockContainer"] {
+        padding-right: 1rem !important;
+    }
+}
+"""
+
 # Display-preference toggles shown in the sidebar, as key -> (label,
 # default). Keys start with `ui_` so reset_game() can preserve them across
 # "Play again".
@@ -345,11 +401,11 @@ def _render_roster_list(engine: GameEngine, human_id: int, night_vision: bool) -
 
 
 def _render_roster_cards(engine: GameEngine, human_id: int, night_vision: bool) -> None:
-    """Roster as a card grid. Same reveal rules as the list view - only the
+    """Roster as compact one-line entries, one per player, for the narrow
+    right-hand panel. Same reveal rules as the list view - only the
     presentation changes.
     """
-    cols = st.columns(4)
-    for i, p in enumerate(engine.players):
+    for p in engine.players:
         reveal = (
             (not p.is_alive)
             or (p.id == human_id)
@@ -362,14 +418,11 @@ def _render_roster_cards(engine: GameEngine, human_id: int, night_vision: bool) 
             avatar = "🐺"
         else:
             # Hidden players and revealed villagers keep their own distinct
-            # human avatar - the role text below says the rest.
+            # human avatar - the role text says the rest.
             avatar = PLAYER_AVATARS[p.id % len(PLAYER_AVATARS)]
         role_label = p.role.value if reveal else "?"
-        status = "alive" if p.is_alive else "dead"
-        card = cols[i % 4].container(border=True)
-        card.markdown(f"## {avatar}")
-        card.write(f"**{p.name}**")
-        card.caption(f"{role_label} · {status}")
+        status = "🟢" if p.is_alive else "⚰️"
+        st.markdown(f"{avatar} **{p.name}** · {role_label} · {status}")
 
 
 def render_game() -> None:
@@ -399,15 +452,21 @@ def render_game() -> None:
     )
     if werewolf_night_vision:
         st.info(
-            "🌙 It's night — as a werewolf, you can see everyone's true role below."
+            "🌙 It's night — as a werewolf, you can see everyone's "
+            "true role in the roster on the right."
         )
 
-    # The roster is always visible, right under the metrics - no expander.
-    st.subheader("Roster")
-    if ui_pref("ui_cards"):
-        _render_roster_cards(engine, human_id, werewolf_night_vision)
-    else:
-        _render_roster_list(engine, human_id, werewolf_night_vision)
+    # The roster is pinned to the right edge via ROSTER_PANEL_CSS (mockup
+    # layout). It stays a plain keyed container at top level - st.columns
+    # would corrupt the AppTest element tree in this app (see the comment
+    # on ROSTER_PANEL_CSS).
+    st.markdown(f"<style>{ROSTER_PANEL_CSS}</style>", unsafe_allow_html=True)
+    with st.container(key="roster_panel"):
+        st.subheader("Roster")
+        if ui_pref("ui_cards"):
+            _render_roster_cards(engine, human_id, werewolf_night_vision)
+        else:
+            _render_roster_list(engine, human_id, werewolf_night_vision)
 
     # The game log renders into the sidebar, next to the display settings.
     _render_game_log()
