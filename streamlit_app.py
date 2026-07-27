@@ -9,6 +9,7 @@ from application.game_engine import GameEngine
 from application.setup import GameSetupService
 from domain.enums import GamePhase, GameResult, Role
 from domain.exceptions import GameError
+from domain.entities import Player
 from domain.rules import MAX_PLAYERS, MIN_PLAYERS
 from infrastructure.streamlit_adapter import (
     BufferingNotifier,
@@ -23,11 +24,34 @@ from infrastructure.transcript_vote_strategy import StubTranscriptVoteStrategy
 
 load_dotenv()
 
-st.set_page_config(page_title="Werewolf", page_icon="🐺", layout="centered")
+st.set_page_config(page_title="Werewolf", page_icon="🐺", layout="wide")
 
 DEFAULT_BOT_NAMES = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi"]
 DISCUSSION_BUDGET_SECONDS = 45.0
 AGENT_LLM_MODEL = os.getenv("AGENT_LLM_MODEL")
+
+# One distinct human avatar per player id (max MAX_PLAYERS players). Dead
+# players and revealed werewolves override this with ⚰️/🐺 in the roster.
+PLAYER_AVATARS = ["👨", "👩", "🧔", "👴", "👵", "🧓", "👱", "🧕"]
+
+# Display-preference toggles shown in the sidebar, as key -> (label,
+# default). Keys start with `ui_` so reset_game() can preserve them across
+# "Play again".
+UI_TOGGLES = {
+    "ui_cards": ("🃏 Roster as cards", True),
+    "ui_formatted_log": ("📜 Formatted game log", True),
+    "ui_newest_first": ("🔄 Newest messages first", False),
+}
+
+
+def ui_pref(key: str) -> bool:
+    return bool(st.session_state.get(key, UI_TOGGLES[key][1]))
+
+
+def render_display_settings() -> None:
+    st.sidebar.subheader("⚙️ Display")
+    for key, (label, default) in UI_TOGGLES.items():
+        st.sidebar.checkbox(label, value=default, key=key)
 
 
 def start_new_game(num_players: int, human_name: str) -> None:
@@ -94,22 +118,52 @@ def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
 
 
 def reset_game() -> None:
+    # Keep ui_* display preferences across games; everything else goes.
     for key in list(st.session_state.keys()):
-        del st.session_state[key]
+        if not key.startswith("ui_"):
+            del st.session_state[key]
 
 
 def render_setup() -> None:
-    st.title("🐺 Werewolf")
-    st.write("A social deduction prototype. Play one seat yourself; the rest are bots.")
+    space_left, col_center, space_right = st.columns([0.2, 0.6, 0.2])
 
-    with st.form("setup_form"):
+    with col_center:
+        st.subheader("🐺 Werewolf")
+        st.write(
+            "A social deduction prototype. Play one seat yourself; the rest are bots."
+        )
+
+        with st.expander("📖 How to play"):
+            st.write(
+                "- **Night:** the werewolves secretly choose one villager to "
+                "eliminate. If you're a werewolf, you make that choice.\n"
+                "- **Day:** everyone discusses who seems suspicious, then votes. "
+                "The player with the most votes is eliminated; ties eliminate no one.\n"
+                "- **Villagers win** when all werewolves are dead. **Werewolves "
+                "win** when they match or outnumber the villagers.\n"
+                f"- Games of {MIN_PLAYERS}-6 players have 1 werewolf; "
+                f"7-{MAX_PLAYERS} players have 2."
+            )
+
+        # Outside the form so the bot preview below updates live as it changes -
+        # widgets inside a st.form don't trigger a rerun until submission.
         num_players = st.slider("Number of players", MIN_PLAYERS, MAX_PLAYERS, 6)
-        human_name = st.text_input("Your name", value="You")
-        submitted = st.form_submit_button("Start Game", use_container_width=True)
+        bot_names = DEFAULT_BOT_NAMES[1:num_players]
+        st.caption(f"Bots in this game: {', '.join(bot_names)}")
 
-    if submitted:
-        start_new_game(num_players, human_name)
-        st.rerun()
+        with st.form("setup_form"):
+            human_name = st.text_input("Your name", value="You")
+            submitted = st.form_submit_button("Start Game", use_container_width=True)
+
+        if submitted:
+            name = human_name.strip() or "You"
+            if name.lower() in (bot.lower() for bot in bot_names):
+                # Names double as identity in the vote record and discussion
+                # transcripts, so sharing one with a bot would corrupt both.
+                st.warning(f"'{name}' is already taken by a bot - pick another name.")
+                return
+            start_new_game(num_players, name)
+            st.rerun()
 
 
 def advance_engine() -> None:
@@ -151,8 +205,38 @@ def advance_engine() -> None:
         break
 
 
+def _render_transcript_messages(discussion: DiscussionCoordinator) -> None:
+    """Renders the discussion transcript as chat messages, in chronological
+    order or newest-first depending on the ui_newest_first toggle.
+
+    Each speaker gets the same per-player human avatar shown in the roster
+    cards - but never the roster's 🐺/⚰️ overrides, which would leak roles
+    and deaths mid-discussion. Coordinator-injected "System" notices get a
+    neutral ⚙️.
+    """
+    avatars = {
+        p.name: PLAYER_AVATARS[p.id % len(PLAYER_AVATARS)]
+        for p in discussion.alive_players
+    }
+    messages = discussion.snapshot_transcript()
+    if ui_pref("ui_newest_first"):
+        messages = list(reversed(messages))
+
+    # Chat area
+    chat_area = st.container(height=400)
+
+    with chat_area:
+        for msg in messages:
+            with st.chat_message(
+                "user" if msg.is_human else "assistant",
+                avatar=avatars.get(msg.speaker_name, "⚙️"),
+            ):
+                st.write(f"**{msg.speaker_name}:** {msg.content}")
+
+
 def render_pending_decision() -> None:
     pending: PendingHumanDecision = st.session_state.pending
+
     st.subheader(pending.prompt)
     cols = st.columns(len(pending.candidates)) if len(pending.candidates) <= 4 else None
 
@@ -167,45 +251,145 @@ def render_pending_decision() -> None:
             st.session_state.pending = None
             st.rerun()
 
+    # While the human is deciding their day vote, keep the discussion they
+    # just had on screen below the vote buttons - read-only: the live
+    # fragment (countdown, chat input, auto-rerun) only makes sense while
+    # the discussion is actually running.
+    discussion = st.session_state.get("discussion")
+    if pending.key.startswith("day_vote") and discussion is not None:
+        st.subheader("Village discussion")
+        _render_transcript_messages(discussion)
+
 
 @st.fragment(run_every="1s")
-def render_discussion(discussion: DiscussionCoordinator, human) -> None:
-    """Everything about the live discussion - the countdown, the message
-    list, and the human's input - lives in this ONE fragment, and all of
-    it refreshes together on the same 1-second cadence.
+def render_discussion(human: Player, discussion: DiscussionCoordinator) -> None:
+    """The live discussion - countdown and message list - refreshes on a
+    1-second cadence. It doesn't drive the discussion forward: bots speak
+    on their own schedule in a background thread (see
+    application/discussion.py), so this only reads that shared state
+    (thread-safely, via `snapshot_transcript()`) and renders it.
 
-    Unlike the earlier tick-based version, this fragment doesn't drive
-    the discussion forward at all - bots are already speaking on their
-    own independent schedule in a background thread (see
-    application/discussion.py). This function's only job is to
-    periodically read that shared state (thread-safely, via
-    `snapshot_transcript()`) and render it, plus forward the human's
-    chat input into the same shared transcript.
+    The human's chat input deliberately does NOT live here: Streamlit only
+    pins an st.chat_input to the bottom of the viewport (its sticky
+    "bottom" block) when the call happens at the top level of the main
+    container with no ancestor blocks - inside this fragment it renders
+    inline and scrolls away with the content. It's called in render_game
+    instead.
     """
-    st.subheader("Village discussion")
-    st.caption(f"{int(discussion.time_remaining)}s remaining before the vote.")
-    st.progress(
-        min(1.0, max(0.0, discussion.time_remaining / discussion.budget_seconds))
-    )
+    col_header, col_timer = st.columns([0.3, 0.7])
+    with col_header:
+        st.subheader("Village Discussion")
 
-    # Capture the human's input *before* rendering the message list below.
-    # st.chat_input always stays visually pinned to the bottom of the page
-    # regardless of where it's called in the code, so calling it here
-    # doesn't affect layout - but it does mean that if this particular
-    # fragment run was triggered by the human submitting a message, that
-    # message is already appended by the time we render the transcript,
-    # so it shows up immediately instead of waiting for the next tick.
-    if human.is_alive:
-        message = st.chat_input("Say something to the village...")
-        if message:
-            discussion.add_human_message(human.name, message)
+    with col_timer:
+        st.caption(f"{int(discussion.time_remaining)}s remaining before the vote.")
+        st.progress(
+            min(1.0, max(0.0, discussion.time_remaining / discussion.budget_seconds))
+        )
 
-    for msg in discussion.snapshot_transcript():
-        with st.chat_message("user" if msg.is_human else "assistant"):
-            st.write(f"**{msg.speaker_name}:** {msg.content}")
+    _render_transcript_messages(discussion)
+
+    # # Called at the top level of the main container on purpose: that's
+    # # the only spot where Streamlit pins the input to its sticky
+    # # bottom-of-viewport block, so it never scrolls out. It's also
+    # # captured *before* rendering the transcript below, so a submitted
+    # # message is appended before this same run renders the discussion -
+    # # it shows up immediately instead of one rerun later.
+    # if human.is_alive:
+    #     message = st.chat_input("Say something to the village...", max_chars=1000)
+    #     if message:
+    #         discussion.add_human_message(human.name, message)
 
     if discussion.is_finished:
         st.rerun()
+
+
+def _format_log_line(line: str) -> str:
+    """Maps one raw game-log line to an icon-prefixed line for the formatted
+    log view. Pure presentation - the log's content is unchanged.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith("--- Night"):
+        return f"🌙 **{stripped}**"
+    if stripped.startswith("--- Day"):
+        return f"☀️ **{stripped}**"
+    if "was found dead" in stripped:
+        return f"⚰️ {stripped}"
+    if "was voted out" in stripped:
+        return f"❌ {stripped}"
+    if "votes for" in stripped:
+        return f"🗳️ {stripped}"
+    if "tied" in stripped:
+        return f"🤝 {stripped}"
+    if "Game Over" in stripped:
+        return f"🏁 **{stripped}**"
+    return stripped
+
+
+def _render_game_log() -> None:
+    """The game log lives in the sidebar, below the display settings."""
+    st.sidebar.divider()
+    st.sidebar.subheader("Game Log")
+    log_lines = st.session_state.log
+    if not ui_pref("ui_formatted_log"):
+        st.sidebar.text(
+            "\n".join(log_lines) if log_lines else "The game is about to begin..."
+        )
+        return
+    if not log_lines:
+        st.sidebar.caption("The game is about to begin...")
+    for line in log_lines:
+        formatted = _format_log_line(line)
+        if formatted:
+            st.sidebar.markdown(formatted)
+
+
+def _render_roster_list(engine: GameEngine, human_id: int, night_vision: bool) -> None:
+    """The classic roster rendering (pre-cards)."""
+    for p in engine.players:
+        reveal = (
+            (not p.is_alive)
+            or (p.id == human_id)
+            or engine.result != GameResult.ONGOING
+            or night_vision
+        )
+        role_label = p.role.value if reveal else "?"
+        status = "🟢 alive" if p.is_alive else "⚰️ dead"
+        st.write(f"**{p.name}** — {role_label} — {status}")
+
+
+def _render_roster_cards(engine: GameEngine, human_id: int, night_vision: bool) -> None:
+    """Roster as a card grid. Same reveal rules as the list view - only the
+    presentation changes.
+    """
+    for i, p in enumerate(engine.players):
+        reveal = (
+            (not p.is_alive)
+            or (p.id == human_id)
+            or engine.result != GameResult.ONGOING
+            or night_vision
+        )
+        if not p.is_alive:
+            avatar = "⚰️"
+        elif reveal and p.role == Role.WEREWOLF:
+            avatar = "🐺"
+        else:
+            # Hidden players and revealed villagers keep their own distinct
+            # human avatar - the role text below says the rest.
+            avatar = PLAYER_AVATARS[p.id % len(PLAYER_AVATARS)]
+        role_label = p.role.value if reveal else "?"
+        status = "alive" if p.is_alive else "dead"
+        card = st.container(height=100, border=True)
+        with card:
+            icon_col, name_col = st.columns([0.25, 0.75])
+
+            with icon_col:
+                st.markdown(f"## {avatar}", anchors=False)
+
+            with name_col:
+                st.write(f"**{p.name}**")
+                st.caption(f"{role_label} · {status}")
 
 
 def render_game() -> None:
@@ -213,66 +397,89 @@ def render_game() -> None:
     human_id = st.session_state.human_id
     human = next(p for p in engine.players if p.id == human_id)
 
-    st.title("🐺 Werewolf")
-    role_note = "" if human.is_alive else " — you have been eliminated"
-    st.caption(f"You are **{human.name}**, a **{human.role.value}**{role_note}.")
-
-    col1, col2 = st.columns(2)
-    col1.metric(
-        "Round", engine.round_number if engine.result == GameResult.ONGOING else "—"
-    )
-    col2.metric("Phase", engine.phase.value.capitalize())
-
-    advance_engine()
-
-    if st.session_state.pending is not None:
-        render_pending_decision()
-    elif (
-        engine.phase == GamePhase.DAY and st.session_state.get("discussion") is not None
-    ):
-        render_discussion(st.session_state.discussion, human)
-
     werewolf_night_vision = (
         human.is_alive
         and human.role == Role.WEREWOLF
         and engine.phase == GamePhase.NIGHT
     )
-    if werewolf_night_vision:
-        st.info(
-            "🌙 It's night — as a werewolf, you can see everyone's true role below."
-        )
 
-    with st.expander("Roster", expanded=True):
-        for p in engine.players:
-            reveal = (
-                (not p.is_alive)
-                or (p.id == human_id)
-                or engine.result != GameResult.ONGOING
-                or werewolf_night_vision
+    col_main, col_right = st.columns([0.8, 0.2])
+
+    with col_main:
+        title_left, title_right = st.columns([0.3, 0.7])
+        with title_left:
+            st.title("🐺 Werewolf")
+            role_note = "" if human.is_alive else " — you have been eliminated"
+            st.caption(
+                f"You are **{human.name}**, a **{human.role.value}**{role_note}."
             )
-            role_label = p.role.value if reveal else "?"
-            status = "🟢 alive" if p.is_alive else "⚰️ dead"
-            st.write(f"**{p.name}** — {role_label} — {status}")
 
-    st.subheader("Game Log")
-    log_text = (
-        "\n".join(st.session_state.log)
-        if st.session_state.log
-        else "The game is about to begin..."
-    )
-    st.text(log_text)
+        with title_right:
+            alive = sum(1 for p in engine.players if p.is_alive)
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric(
+                "Round",
+                engine.round_number if engine.result == GameResult.ONGOING else "—",
+            )
+            col2.metric("Phase", engine.phase.value.capitalize())
+            col3.metric("Alive", f"{alive}/{len(engine.players)}")
+            col4.metric("Eliminated", len(engine.players) - alive)
 
-    if engine.result != GameResult.ONGOING:
-        if engine.result == GameResult.VILLAGERS_WIN:
-            st.success("Villagers win! 🎉")
-        else:
-            st.error("Werewolves win! 🐺")
-        if st.button("Play again", use_container_width=True):
-            reset_game()
+        advance_engine()
+
+        if werewolf_night_vision:
+            st.info(
+                "🌙 It's night — as a werewolf, you can see everyone's true role below."
+            )
+
+        # The game log renders into the sidebar, next to the display settings.
+        _render_game_log()
+
+        if st.session_state.pending is not None:
+            render_pending_decision()
+        elif (
+            engine.phase == GamePhase.DAY
+            and st.session_state.get("discussion") is not None
+        ):
+            discussion = st.session_state.discussion
+            render_discussion(human, discussion)
+
+        if engine.result != GameResult.ONGOING:
+            if engine.result == GameResult.VILLAGERS_WIN:
+                st.success("Villagers win! 🎉")
+            else:
+                st.error("Werewolves win! 🐺")
+            if st.button("Play again", use_container_width=True):
+                reset_game()
+                st.rerun()
+
+    # Called at the top level of the main container on purpose: that's
+    # the only spot where Streamlit pins the input to its sticky
+    # bottom-of-viewport block, so it never scrolls out. It's also
+    # captured *before* rendering the transcript below, so a submitted
+    # message is appended before this same run renders the discussion -
+    # it shows up immediately instead of one rerun later.
+    if human.is_alive:
+        message = st.chat_input("Say something to the village...", max_chars=1000)
+        if message:
+            discussion.add_human_message(human.name, message)
             st.rerun()
+
+    with col_right:
+        # The roster is always visible, right under the metrics - no expander.
+        # st.subheader("Roster")
+        if ui_pref("ui_cards"):
+            _render_roster_cards(engine, human_id, werewolf_night_vision)
+        else:
+            _render_roster_list(engine, human_id, werewolf_night_vision)
 
 
 def main() -> None:
+    # Settings render on every screen: Streamlit drops the session-state
+    # entry of a widget that isn't rendered in a run, so keeping the
+    # checkboxes mounted is what makes the ui_* preferences survive
+    # transitions like "Play again".
+    render_display_settings()
     if "engine" not in st.session_state:
         render_setup()
     else:
