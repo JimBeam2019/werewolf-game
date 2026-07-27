@@ -1,4 +1,5 @@
 import os
+import uuid
 import streamlit as st
 
 from dotenv import load_dotenv
@@ -7,9 +8,9 @@ from langchain_ollama import ChatOllama
 from application.discussion import DiscussionCoordinator
 from application.game_engine import GameEngine
 from application.setup import GameSetupService
+from domain.entities import ChatMessage
 from domain.enums import GamePhase, GameResult, Role
 from domain.exceptions import GameError
-from domain.entities import Player
 from domain.rules import MAX_PLAYERS, MIN_PLAYERS
 from infrastructure.streamlit_adapter import (
     BufferingNotifier,
@@ -18,6 +19,7 @@ from infrastructure.streamlit_adapter import (
     StreamlitWerewolfStrategy,
 )
 from infrastructure.langchain_speak_strategy import LangChainSpeakStrategy
+from infrastructure.langgraph_memory import LangGraphMemoryStore
 
 # from infrastructure.stub_speak_strategy import StubSpeakStrategy
 from infrastructure.transcript_vote_strategy import StubTranscriptVoteStrategy
@@ -56,7 +58,7 @@ def render_display_settings() -> None:
 
 def start_new_game(num_players: int, human_name: str) -> None:
     names = DEFAULT_BOT_NAMES[:num_players]
-    names[0] = human_name.strip() or "You"
+    names[0] = human_name.strip() or "John"
 
     try:
         players = GameSetupService.create_players(names)
@@ -92,6 +94,25 @@ def start_new_game(num_players: int, human_name: str) -> None:
     st.session_state.log = []
     st.session_state.pending = None
     st.session_state.discussion = None
+    st.session_state.game_id = str(uuid.uuid4())
+    st.session_state.memory_store = LangGraphMemoryStore()
+
+
+def _persist_system_messages(lines) -> None:
+    """Folds game-event log lines (night kills, day eliminations) into
+    the same cross-round memory as the discussion transcript, so tomorrow's
+    agents know who died or was voted out yesterday - not just what was
+    said in chat.
+    """
+    messages = [
+        ChatMessage(speaker_name="Game", content=line.strip(), is_human=False)
+        for line in lines
+        if line.strip()
+    ]
+    if messages:
+        st.session_state.memory_store.append_and_save(
+            st.session_state.game_id, messages
+        )
 
 
 def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
@@ -99,11 +120,19 @@ def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
     first time it's needed, then returns the same instance on every
     subsequent call this round - so repeated Streamlit reruns don't reset
     the 45-second clock or lose the transcript so far.
+
+    `prior_history` is loaded from the cross-round memory store, giving
+    this round's agents access to everything that happened on earlier
+    days (previous chat, who was killed, who was voted out) - without it,
+    every new day would start as if the game had no past at all.
     """
     if st.session_state.get("discussion") is None:
+        prior_history = st.session_state.memory_store.load_history(
+            st.session_state.game_id
+        )
         llm = ChatOllama(
             model=AGENT_LLM_MODEL if AGENT_LLM_MODEL else "llama3.1:8b-instruct-q4_K_M",
-            temperature=0.6,
+            temperature=0.8,
         )
         discussion = DiscussionCoordinator(
             alive_players=engine.alive_players(),
@@ -111,6 +140,7 @@ def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
             # speak_strategy=StubSpeakStrategy(),
             speak_strategy=LangChainSpeakStrategy(llm=llm),
             budget_seconds=DISCUSSION_BUDGET_SECONDS,
+            prior_history=prior_history,
         )
         discussion.start()
         st.session_state.discussion = discussion
@@ -125,7 +155,7 @@ def reset_game() -> None:
 
 
 def render_setup() -> None:
-    space_left, col_center, space_right = st.columns([0.2, 0.6, 0.2])
+    omit_left, col_center, omit_right = st.columns([0.2, 0.6, 0.2])
 
     with col_center:
         st.subheader("🐺 Werewolf")
@@ -152,11 +182,11 @@ def render_setup() -> None:
         st.caption(f"Bots in this game: {', '.join(bot_names)}")
 
         with st.form("setup_form"):
-            human_name = st.text_input("Your name", value="You")
+            human_name = st.text_input("Your name", value="John")
             submitted = st.form_submit_button("Start Game", use_container_width=True)
 
         if submitted:
-            name = human_name.strip() or "You"
+            name = human_name.strip() or "John"
             if name.lower() in (bot.lower() for bot in bot_names):
                 # Names double as identity in the vote record and discussion
                 # transcripts, so sharing one with a bot would corrupt both.
@@ -183,6 +213,7 @@ def advance_engine() -> None:
                 st.session_state.pending = pending
                 return
             st.session_state.log.extend(engine.notifier.buffer)  # type: ignore
+            _persist_system_messages(engine.notifier.buffer)  # type: ignore
             st.session_state.pending = None
             continue
 
@@ -193,11 +224,19 @@ def advance_engine() -> None:
 
             engine.notifier.buffer.clear()  # type: ignore
             try:
-                engine.run_day_phase(transcript=discussion.snapshot_transcript())
+                engine.run_day_phase(transcript=discussion.full_context())
             except PendingHumanDecision as pending:
                 st.session_state.pending = pending
                 return
             st.session_state.log.extend(engine.notifier.buffer)  # type: ignore
+            # Persist today's fresh chat (not full_context(), which would
+            # duplicate prior_history that's already saved) plus the vote
+            # outcome, so tomorrow's agents remember both the conversation
+            # and what actually happened as a result of it.
+            st.session_state.memory_store.append_and_save(
+                st.session_state.game_id, discussion.snapshot_transcript()
+            )
+            _persist_system_messages(engine.notifier.buffer)  # type: ignore
             st.session_state.pending = None
             st.session_state.discussion = None  # fresh coordinator next round
             continue
@@ -262,7 +301,7 @@ def render_pending_decision() -> None:
 
 
 @st.fragment(run_every="1s")
-def render_discussion(human: Player, discussion: DiscussionCoordinator) -> None:
+def render_discussion(discussion: DiscussionCoordinator) -> None:
     """The live discussion - countdown and message list - refreshes on a
     1-second cadence. It doesn't drive the discussion forward: bots speak
     on their own schedule in a background thread (see
@@ -287,17 +326,6 @@ def render_discussion(human: Player, discussion: DiscussionCoordinator) -> None:
         )
 
     _render_transcript_messages(discussion)
-
-    # # Called at the top level of the main container on purpose: that's
-    # # the only spot where Streamlit pins the input to its sticky
-    # # bottom-of-viewport block, so it never scrolls out. It's also
-    # # captured *before* rendering the transcript below, so a submitted
-    # # message is appended before this same run renders the discussion -
-    # # it shows up immediately instead of one rerun later.
-    # if human.is_alive:
-    #     message = st.chat_input("Say something to the village...", max_chars=1000)
-    #     if message:
-    #         discussion.add_human_message(human.name, message)
 
     if discussion.is_finished:
         st.rerun()
@@ -442,7 +470,7 @@ def render_game() -> None:
             and st.session_state.get("discussion") is not None
         ):
             discussion = st.session_state.discussion
-            render_discussion(human, discussion)
+            render_discussion(discussion)
 
         if engine.result != GameResult.ONGOING:
             if engine.result == GameResult.VILLAGERS_WIN:

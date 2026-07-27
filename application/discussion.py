@@ -49,6 +49,15 @@ class DiscussionCoordinator:
     speak_strategy: AgentSpeakStrategy
     budget_seconds: float = 45.0
     speak_delay_range: Tuple[float, float] = (3.0, 7.0)
+    prior_history: List[ChatMessage] = field(default_factory=list)
+    """Everything that happened in *earlier* rounds (previous days'
+    discussions, night kills, day eliminations) - loaded from a
+    GameMemoryStore and given to agents as read-only context. Kept
+    separate from `transcript` (today's chat only) rather than merged in,
+    so the UI's "today's discussion" panel and existing tests/behavior
+    around `transcript` don't change - `full_context()` is what combines
+    the two for anything that needs the complete picture.
+    """
 
     transcript: List[ChatMessage] = field(default_factory=list)
     start_time: Optional[float] = None
@@ -120,12 +129,23 @@ class DiscussionCoordinator:
             )
 
     def snapshot_transcript(self) -> List[ChatMessage]:
-        """A thread-safe copy of the transcript so far - use this rather
-        than iterating `self.transcript` directly from outside the lock,
-        since a background task could be appending to it concurrently.
+        """A thread-safe copy of *today's* transcript only - use this
+        rather than iterating `self.transcript` directly from outside the
+        lock, since a background task could be appending to it
+        concurrently. See `full_context()` for today's chat plus every
+        earlier round combined.
         """
         with self._lock:
             return list(self.transcript)
+
+    def full_context(self) -> List[ChatMessage]:
+        """Everything from earlier rounds plus today's chat so far, in
+        chronological order. This is what speak/vote strategies should
+        reason over if they want the complete picture rather than just
+        today's conversation.
+        """
+        with self._lock:
+            return list(self.prior_history) + list(self.transcript)
 
     def _append_bot_message(self, speaker_name: str, content: str) -> None:
         with self._lock:
@@ -135,7 +155,9 @@ class DiscussionCoordinator:
 
     def _snapshot_for_agent(self) -> Tuple[List[ChatMessage], List[Player]]:
         with self._lock:
-            return list(self.transcript), list(self.alive_players)
+            return list(self.prior_history) + list(self.transcript), list(
+                self.alive_players
+            )
 
     def _run_event_loop(self) -> None:
         """Background thread entry point: hosts a dedicated asyncio event
