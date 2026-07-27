@@ -56,3 +56,21 @@ class Notifier(Protocol):
     """
 
     def notify(self, message: str) -> None: ...
+
+
+class GameMemoryStore(Protocol):
+    """Persists the full, cross-round game history (discussion messages
+    and game events like kills/eliminations) under a `game_id`, so a new
+    day's discussion and vote strategies can see everything that happened
+    on *earlier* days - not just the current round's fresh transcript.
+
+    Without this, every new day's DiscussionCoordinator starts from an
+    empty transcript and agents have no memory of who was killed, who
+    they accused yesterday, or what anyone else said in prior rounds.
+    """
+
+    def load_history(self, game_id: str) -> List[ChatMessage]: ...
+
+    def append_and_save(
+        self, game_id: str, new_messages: List[ChatMessage]
+    ) -> List[ChatMessage]: ...
