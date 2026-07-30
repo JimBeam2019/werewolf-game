@@ -128,9 +128,7 @@ class TestStreamlitApp(unittest.TestCase):
                 any("werewolf" in i.value.lower() for i in at.info),
                 msg="Expected a night-vision info banner for the werewolf player",
             )
-            self.assertTrue(
-                at.markdown, msg="Roster should not be empty"
-            )
+            self.assertTrue(at.markdown, msg="Roster should not be empty")
             self.assertEqual(
                 hidden_role_count(at),
                 0,
@@ -401,7 +399,9 @@ class TestFormatLogLine(unittest.TestCase):
         self.assertIn("⚰️", _format_log_line("Bob was found dead this morning."))
         self.assertIn("❌", _format_log_line("Eve was voted out by the village."))
         self.assertIn("🗳️", _format_log_line("Alice votes for Bob"))
-        self.assertIn("🤝", _format_log_line("The vote was tied. No one is eliminated."))
+        self.assertIn(
+            "🤝", _format_log_line("The vote was tied. No one is eliminated.")
+        )
         self.assertIn("🏁", _format_log_line("=== Game Over: VILLAGERS_WIN ==="))
         self.assertEqual(
             _format_log_line("  Alice (villager, alive)"), "Alice (villager, alive)"
@@ -455,9 +455,7 @@ class TestDisplaySettings(unittest.TestCase):
 
     def test_roster_cards_have_distinct_avatars_per_player(self):
         at = self._start_game(num_players=6)
-        avatars = {
-            m.value for m in at.markdown if m.value.startswith("## ")
-        }
+        avatars = {m.value for m in at.markdown if m.value.startswith("## ")}
         # Whatever the roles/vision situation at game start, six players
         # with per-id avatars can never collapse to fewer than 3 distinct
         # ones (worst case: night vision reveals 🐺s, the rest are unique).

@@ -13,10 +13,14 @@ class Player:
     id: int
     name: str
     role: Role
+    background: str = ""
     is_alive: bool = True
 
     def kill(self) -> None:
         self.is_alive = False
+
+    def set_background(self, background: str) -> None:
+        self.background = background
 
     @property
     def is_werewolf(self) -> bool:

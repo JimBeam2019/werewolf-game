@@ -74,3 +74,11 @@ class GameMemoryStore(Protocol):
     def append_and_save(
         self, game_id: str, new_messages: List[ChatMessage]
     ) -> List[ChatMessage]: ...
+
+
+class BackgroundKnowledgeProvider(Protocol):
+    """
+    Provide agent player background knowledge
+    """
+
+    def get_background(self, player: Player) -> str: ...

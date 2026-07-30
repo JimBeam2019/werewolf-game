@@ -121,6 +121,52 @@ class TestDiscussionCoordinator(unittest.TestCase):
         self.assertTrue(coordinator.is_finished)
         self.assertEqual(coordinator.snapshot_transcript(), [])
 
+    def test_full_context_combines_prior_history_and_todays_transcript(self):
+        from domain.entities import ChatMessage
+
+        prior = [ChatMessage(speaker_name="Game", content="Bob was killed.")]
+        coordinator = make_coordinator(prior_history=prior, budget_seconds=100.0)
+        coordinator.start()
+        try:
+            coordinator.add_human_message("Jim", "hi")
+            context = coordinator.full_context()
+            self.assertEqual(len(context), 2)
+            self.assertEqual(context[0].content, "Bob was killed.")
+            self.assertEqual(context[1].content, "hi")
+            # snapshot_transcript() stays scoped to today only
+            self.assertEqual(len(coordinator.snapshot_transcript()), 1)
+        finally:
+            coordinator.stop(join_timeout=3.0)
+
+    def test_agents_actually_see_prior_history_during_their_turn(self):
+        from domain.entities import ChatMessage
+
+        received = []
+
+        class RecordingStrategy:
+            async def speak(self, speaker, transcript, alive_players):
+                received.append(list(transcript))
+                return "ok"
+
+        prior = [ChatMessage(speaker_name="Game", content="Dave was killed.")]
+        coordinator = make_coordinator(
+            speak_strategy=RecordingStrategy(),
+            prior_history=prior,
+            budget_seconds=1.0,
+            speak_delay_range=(0.05, 0.1),
+        )
+        coordinator.start()
+        deadline = time.monotonic() + 2.0
+        while not coordinator.is_finished and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        self.assertTrue(received, "expected at least one agent turn to occur")
+        first_turn_context = received[0]
+        self.assertTrue(
+            any(m.content == "Dave was killed." for m in first_turn_context),
+            msg="Agents should see prior_history from the very first turn",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
