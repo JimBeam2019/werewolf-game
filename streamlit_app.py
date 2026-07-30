@@ -3,8 +3,10 @@ import uuid
 import streamlit as st
 
 from dotenv import load_dotenv
-from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 
+
+from application.session_states import initialize_params
 from application.discussion import DiscussionCoordinator
 from application.game_engine import GameEngine
 from application.setup import GameSetupService
@@ -20,6 +22,8 @@ from infrastructure.streamlit_adapter import (
 )
 from infrastructure.langchain_speak_strategy import LangChainSpeakStrategy
 from infrastructure.langgraph_memory import LangGraphMemoryStore
+from infrastructure.load_file import initialize_knowledge_base
+from infrastructure.background_knowledge_provider import RAGBackgroundKnowledgeProvider
 
 # from infrastructure.stub_speak_strategy import StubSpeakStrategy
 from infrastructure.transcript_vote_strategy import StubTranscriptVoteStrategy
@@ -31,6 +35,7 @@ st.set_page_config(page_title="Werewolf", page_icon="🐺", layout="wide")
 DEFAULT_BOT_NAMES = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi"]
 DISCUSSION_BUDGET_SECONDS = 45.0
 AGENT_LLM_MODEL = os.getenv("AGENT_LLM_MODEL")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 
 # One distinct human avatar per player id (max MAX_PLAYERS players). Dead
 # players and revealed werewolves override this with ⚰️/🐺 in the roster.
@@ -44,6 +49,9 @@ UI_TOGGLES = {
     "ui_formatted_log": ("📜 Formatted game log", True),
     "ui_newest_first": ("🔄 Newest messages first", False),
 }
+
+initialize_params()
+vector_store = initialize_knowledge_base(DEFAULT_BOT_NAMES)
 
 
 def ui_pref(key: str) -> bool:
@@ -80,13 +88,18 @@ def start_new_game(num_players: int, human_name: str) -> None:
     )
     notifier = BufferingNotifier()
 
+    background_provider = RAGBackgroundKnowledgeProvider(vector_store)  # type: ignore
+
     engine = GameEngine(
         players=players,
         human_id=human_id,
+        background_provider=background_provider,
+        # vector_store=vector_store,  # type: ignore
         werewolf_strategy=werewolf_strategy,
         vote_strategy=vote_strategy,
         notifier=notifier,
     )
+    engine.set_player_backgrounds()
     holder["engine"] = engine
 
     st.session_state.engine = engine
@@ -130,9 +143,12 @@ def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
         prior_history = st.session_state.memory_store.load_history(
             st.session_state.game_id
         )
-        llm = ChatOllama(
+        llm = ChatOpenAI(
             model=AGENT_LLM_MODEL if AGENT_LLM_MODEL else "llama3.1:8b-instruct-q4_K_M",
+            api_key="EMPTY",  # type: ignore
+            base_url=LLM_BASE_URL,
             temperature=0.8,
+            max_retries=1,
         )
         discussion = DiscussionCoordinator(
             alive_players=engine.alive_players(),
@@ -155,7 +171,7 @@ def reset_game() -> None:
 
 
 def render_setup() -> None:
-    omit_left, col_center, omit_right = st.columns([0.2, 0.6, 0.2])
+    _, col_center, _ = st.columns([0.2, 0.6, 0.2])
 
     with col_center:
         st.subheader("🐺 Werewolf")

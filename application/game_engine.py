@@ -5,6 +5,7 @@ from application.interfaces import (
     Notifier,
     VoteDecisionStrategy,
     WerewolfDecisionStrategy,
+    BackgroundKnowledgeProvider,
 )
 from domain.entities import ChatMessage, Player
 from domain.enums import GamePhase, GameResult, Role
@@ -35,6 +36,7 @@ class GameEngine:
 
     players: List[Player]
     human_id: int
+    background_provider: BackgroundKnowledgeProvider
     werewolf_strategy: WerewolfDecisionStrategy
     vote_strategy: VoteDecisionStrategy
     notifier: Notifier
@@ -42,6 +44,12 @@ class GameEngine:
     round_number: int = 1
     result: GameResult = GameResult.ONGOING
     history: List[object] = field(default_factory=list)
+
+    def set_player_backgrounds(self) -> None:
+        for player in self.players:
+            if player.id != self.human_id:
+                background = self.background_provider.get_background(player)
+                player.set_background(background)
 
     def alive_players(self) -> List[Player]:
         return [p for p in self.players if p.is_alive]

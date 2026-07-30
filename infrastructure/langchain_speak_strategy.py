@@ -122,6 +122,8 @@ class LangChainSpeakStrategy:
                 f"You're {speaker.name}, playing Werewolf as a {speaker.role.value}, "
                 "chatting live with the other players. Other players still in: "
                 f"{others}.\n\n"
+                "Your background knowledge:\n"
+                f"{speaker.background}\n\n"
                 "Talk like a real person texting in a group chat during a fast-paced "
                 "game - casual, short, a little blunt. NOT like a formal writer.\n\n"
                 "Hard rules:\n"
