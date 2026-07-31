@@ -1,5 +1,6 @@
 import os
 import uuid
+import asyncio
 import streamlit as st
 
 from dotenv import load_dotenv
@@ -94,12 +95,17 @@ def start_new_game(num_players: int, human_name: str) -> None:
         players=players,
         human_id=human_id,
         background_provider=background_provider,
-        # vector_store=vector_store,  # type: ignore
         werewolf_strategy=werewolf_strategy,
         vote_strategy=vote_strategy,
         notifier=notifier,
     )
-    engine.set_player_backgrounds()
+
+    with st.spinner("Loading game content. Please wait around a minute..."):
+        try:
+            asyncio.run(engine.set_player_backgrounds())
+        except Exception:
+            pass
+
     holder["engine"] = engine
 
     st.session_state.engine = engine

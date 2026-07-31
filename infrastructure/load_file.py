@@ -1,6 +1,7 @@
 import streamlit as st
 
 from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from infrastructure.retriever import build_vector_store
 
@@ -70,4 +71,10 @@ def initialize_knowledge_base(bot_names: list[str]):
     """
     documents = load_files(bot_names)
 
-    return build_vector_store(documents)  # type: ignore
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000, chunk_overlap=200, add_start_index=True
+    )
+
+    chunks = splitter.split_documents(documents)  # type: ignore
+
+    return build_vector_store(chunks)  # type: ignore

@@ -1,6 +1,8 @@
 import random
 from typing import List, Optional
 
+from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver
 from domain.entities import ChatMessage, Player
 
 
@@ -79,10 +81,18 @@ class LangChainVoteStrategy:
         )
         human = HumanMessage(content=conversation)
 
-        response = self._llm.invoke([system, human])
-        reply = (
-            response.content if hasattr(response, "content") else str(response)
-        ).strip()
+        agent = create_agent(
+            model=self._llm,
+            system_prompt=system,
+            checkpointer=InMemorySaver(),
+        )
+        response = agent.invoke({"messages": [human]})
+        reply = response["messages"][-1].content
+
+        # response = self._llm.invoke([system, human])
+        # reply = (
+        #     response.content if hasattr(response, "content") else str(response)
+        # ).strip()
 
         for candidate in candidates:
             if candidate.name.lower() in reply.lower():
