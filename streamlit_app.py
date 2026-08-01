@@ -4,8 +4,8 @@ import asyncio
 import streamlit as st
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
-
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 
 from application.session_states import initialize_params
 from application.discussion import DiscussionCoordinator
@@ -35,8 +35,12 @@ st.set_page_config(page_title="Werewolf", page_icon="🐺", layout="wide")
 
 DEFAULT_BOT_NAMES = ["Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi"]
 DISCUSSION_BUDGET_SECONDS = 45.0
-AGENT_LLM_MODEL = os.getenv("AGENT_LLM_MODEL")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+
+USE_VLLM = os.getenv("USE_VLLM", "False") == "True"
+AGENT_LLM_MODEL = os.getenv("AGENT_LLM_MODEL", "llama3.1:8b-instruct-q4_K_M")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8000/v1")
+EMBEDDING_LLM_MODEL = os.getenv("EMBEDDING_LLM_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+EMBEDDING_LLM_BASE_URL = os.getenv("EMBEDDING_LLM_BASE_URL", "http://localhost:8001/v1")
 
 # One distinct human avatar per player id (max MAX_PLAYERS players). Dead
 # players and revealed werewolves override this with ⚰️/🐺 in the roster.
@@ -52,7 +56,16 @@ UI_TOGGLES = {
 }
 
 initialize_params()
-vector_store = initialize_knowledge_base(DEFAULT_BOT_NAMES)
+embedding = (
+    OpenAIEmbeddings(
+        model=EMBEDDING_LLM_MODEL,
+        api_key="EMPTY",  # type: ignore
+        base_url=EMBEDDING_LLM_BASE_URL,
+    )
+    if USE_VLLM
+    else OllamaEmbeddings(model=EMBEDDING_LLM_MODEL)
+)
+vector_store = initialize_knowledge_base(DEFAULT_BOT_NAMES, embedding)
 
 
 def ui_pref(key: str) -> bool:
@@ -89,7 +102,9 @@ def start_new_game(num_players: int, human_name: str) -> None:
     )
     notifier = BufferingNotifier()
 
-    background_provider = RAGBackgroundKnowledgeProvider(vector_store)  # type: ignore
+    background_provider = RAGBackgroundKnowledgeProvider(
+        vector_store, USE_VLLM, AGENT_LLM_MODEL, LLM_BASE_URL  # type: ignore
+    )
 
     engine = GameEngine(
         players=players,
@@ -150,7 +165,7 @@ def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
             st.session_state.game_id
         )
         llm = ChatOpenAI(
-            model=AGENT_LLM_MODEL if AGENT_LLM_MODEL else "llama3.1:8b-instruct-q4_K_M",
+            model=AGENT_LLM_MODEL,
             api_key="EMPTY",  # type: ignore
             base_url=LLM_BASE_URL,
             temperature=0.8,

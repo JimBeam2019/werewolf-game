@@ -2,6 +2,8 @@ import streamlit as st
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 
 from infrastructure.retriever import build_vector_store
 
@@ -65,7 +67,9 @@ def load_files(bot_names: list[str]):
 
 
 @st.cache_resource
-def initialize_knowledge_base(bot_names: list[str]):
+def initialize_knowledge_base(
+    bot_names: list[str], embedding: OpenAIEmbeddings | OllamaEmbeddings
+):
     """
     Initialize game knowledge base
     """
@@ -77,4 +81,4 @@ def initialize_knowledge_base(bot_names: list[str]):
 
     chunks = splitter.split_documents(documents)  # type: ignore
 
-    return build_vector_store(chunks)  # type: ignore
+    return build_vector_store(chunks, embedding)  # type: ignore
