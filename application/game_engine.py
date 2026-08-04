@@ -1,5 +1,8 @@
+import asyncio
+import inspect
+
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any, Callable
 
 from application.interfaces import (
     Notifier,
@@ -45,11 +48,27 @@ class GameEngine:
     result: GameResult = GameResult.ONGOING
     history: List[object] = field(default_factory=list)
 
-    def set_player_backgrounds(self) -> None:
+    async def _run_async(
+        self, func: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        if inspect.iscoroutinefunction(func):
+            return await func(*args, **kwargs)
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+    async def _get_background(self, player: Player) -> Any:
+        return await self._run_async(self.background_provider.get_background, player)
+
+    async def set_player_backgrounds(self) -> None:
+        tasks = []
         for player in self.players:
             if player.id != self.human_id:
-                background = self.background_provider.get_background(player)
-                player.set_background(background)
+                tasks.append(
+                    (player, asyncio.create_task(self._get_background(player)))
+                )
+
+        for player, task in tasks:
+            background = await task
+            player.set_background(background)
 
     def alive_players(self) -> List[Player]:
         return [p for p in self.players if p.is_alive]
