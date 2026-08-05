@@ -2,7 +2,7 @@ import streamlit as st
 
 from uuid import uuid4
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_ollama import OllamaEmbeddings, ChatOllama
+from langchain_ollama import OllamaEmbeddings
 from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -13,51 +13,85 @@ from langchain_core.output_parsers import StrOutputParser
 def build_vector_store(
     chunks: list[Document], embedding: OpenAIEmbeddings | OllamaEmbeddings
 ):
-    """
-    Function for retrieving the vector store
-    """
-    if chunks:
-        # If the vector store is not already present in the session state
-        if not st.session_state.vector_store:
-            with st.spinner(text=":red[Please wait while we fetch the information...]"):
-                # embedding = OllamaEmbeddings(model="qwen3-embedding", dimensions=768)
-                vector_store = InMemoryVectorStore(embedding=embedding)
+    """Builds (once per session) or returns the cached vector store.
 
-                uuids = [str(uuid4()) for _ in chunks]
-                vector_store.add_documents(documents=chunks, ids=uuids)
-
-                st.session_state.vector_store = vector_store
-                return vector_store
-        else:
-            return st.session_state.vector_store
-    else:
+    Caching in st.session_state matters here specifically because
+    building this means embedding every chunk of every knowledge file -
+    re-doing that on every Streamlit rerun (which happens on essentially
+    every click) would be slow and pointless, since the knowledge base
+    content never changes mid-session.
+    """
+    if not chunks:
         st.error("No game content was found...")
         return None
 
+    # If the vector store is not already present in the session state
+    if not st.session_state.vector_store:
+        with st.spinner(text=":red[Please wait while we fetch the information...]"):
+            vector_store = InMemoryVectorStore(embedding=embedding)
+
+            uuids = [str(uuid4()) for _ in chunks]
+            vector_store.add_documents(documents=chunks, ids=uuids)
+
+            st.session_state.vector_store = vector_store
+
+    return st.session_state.vector_store
+
 
 def retrieve_from_vector_store(
-    vector_store: InMemoryVectorStore, personality_query: str, strategy_query: str
-):
-    """
-    Function for retrieving the relevant chunks from the vector store
+    vector_store: InMemoryVectorStore, player_name: str, role_value: str
+) -> str:
+    """Retrieves one player's personality profile plus a relevant
+    strategy snippet for their role.
+
+    Personality lookup is an *exact* metadata match (type + entity), not a
+    similarity search: there's exactly one right document per player, so
+    treating it as "find the most similar thing" risks returning a
+    different player's profile if a small/quantized embedding model
+    doesn't discriminate well between two people's writeups. `k=3` (not
+    1) with that exact filter is still safe *and* handles personality
+    files long enough to have been split into more than one chunk by the
+    text splitter upstream - every chunk actually belonging to this
+    player still comes back, ordered by `start_index` so they read in
+    the original order rather than however the search happened to rank
+    them.
+
+    Strategy lookup is a genuine similarity search (MMR, for some result
+    diversity) since there's no single "correct" strategy doc - but it's
+    still filtered to `type == "strategy"` so it can never surface
+    another player's personality text as if it were strategy advice.
     """
     personality_results = vector_store.similarity_search_with_score(
-        personality_query, k=1, where_document={"type": "personality"}
+        f"Personality for {player_name}",
+        k=3,
+        filter=lambda doc: (
+            doc.metadata.get("type") == "personality"
+            and doc.metadata.get("entity") == player_name
+        ),
     )
-    personality_result, _ = personality_results[0]
-    personality_doc = personality_result.page_content
 
-    retriever = vector_store.as_retriever(
-        search_type="mmr", search_kwargs={"k": 1, "lambda_mult": 0.25}
+    personality_chunks = sorted(
+        (doc for doc, _score in personality_results),
+        key=lambda doc: doc.metadata.get("start_index", 0),
+    )
+    personality_text = "".join(doc.page_content for doc in personality_chunks)
+    if not personality_text:
+        personality_text = f"(No personality profile found for {player_name}.)"
+
+    strategy_retriever = vector_store.as_retriever(
+        search_type="mmr",
+        search_kwargs={
+            "k": 1,
+            "fetch_k": 5,
+            "lambda_mult": 0.25,
+            "filter": lambda doc: doc.metadata.get("type") == "strategy",
+        },
     )
 
-    documents = retriever.invoke(strategy_query)
+    strategy_docs = strategy_retriever.invoke(f"Strategy for a {role_value}")
+    strategy_text = "\n\n-----\n\n".join(doc.page_content for doc in strategy_docs)
 
-    return (
-        personality_doc
-        + "\n\n"
-        + "-----\n\n".join(document.page_content for document in documents)
-    )
+    return f"{personality_text}\n\n-----\n\n{strategy_text}"
 
 
 def _format_docs(docs):
@@ -68,13 +102,18 @@ def _format_docs(docs):
 
 def retrieve_from_vllm_vector_store(
     vector_store: InMemoryVectorStore,
-    query: str,
+    player_name: str,
+    role_value: str,
     vllm_model: str,
     inference_server_url: str,
 ):
     """
     Function for retrieving the relevant chunks from the vector store
     """
+    query = (
+        "Use 3-4 sentences to present personality and strategy for "
+        f"{player_name}, who is a {role_value}"
+    )
     retriever = vector_store.as_retriever(
         search_type="similarity",
         search_kwargs={"k": 5, "fetch_k": 5},

@@ -24,17 +24,15 @@ class RAGBackgroundKnowledgeProvider:
         return (
             retrieve_from_vllm_vector_store(
                 self.vector_store,
-                (
-                    "Use 3-4 sentences to present personality and strategy for "
-                    f"{player.name}, who is a {player.role.value}"
-                ),
+                player.name,
+                player.role.value,
                 self.vllm_model,
                 self.vllm_base_url,
             )
             if self.use_vllm
             else retrieve_from_vector_store(
                 self.vector_store,
-                f"Personality for {player.name}",
-                f"Strategy for a {player.role.value}",
+                player.name,
+                player.role.value,
             )
         )

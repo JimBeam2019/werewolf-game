@@ -2,7 +2,7 @@ from typing import Callable, List, Optional
 
 import streamlit as st
 
-from application.interfaces import VoteDecisionStrategy
+from application.interfaces import VoteDecisionStrategy, WerewolfDecisionStrategy
 from domain.entities import ChatMessage, Player
 from infrastructure.random_strategies import RandomVoteStrategy, RandomWerewolfStrategy
 
@@ -43,24 +43,35 @@ class BufferingNotifier:
 
 
 class StreamlitWerewolfStrategy:
-    """Night-kill decision. Bot werewolves decide instantly; if the human
-    player is among the surviving werewolves, this pauses the engine via
-    PendingHumanDecision until a button click supplies an answer.
+    """Night-kill decision. Bot werewolves decide instantly (via
+    `bot_strategy`, defaulting to random - swap in a planning/tool-using
+    strategy to have them target based on real threat signals); if the
+    human player is among the surviving werewolves, this pauses the
+    engine via PendingHumanDecision until a button click supplies an
+    answer.
     """
 
-    def __init__(self, human_player_id: Optional[int], round_getter: Callable[[], int]):
+    def __init__(
+        self,
+        human_player_id: Optional[int],
+        round_getter: Callable[[], int],
+        bot_strategy: Optional[WerewolfDecisionStrategy] = None,
+    ):
         self._human_player_id = human_player_id
-        self._bot = RandomWerewolfStrategy()
+        self._bot = bot_strategy or RandomWerewolfStrategy()
         self._round_getter = round_getter
 
     def choose_victim(
-        self, werewolves: List[Player], candidates: List[Player]
+        self,
+        werewolves: List[Player],
+        candidates: List[Player],
+        transcript: Optional[List[ChatMessage]] = None,
     ) -> Player:
         human_is_werewolf = self._human_player_id is not None and any(
             w.id == self._human_player_id for w in werewolves
         )
         if not human_is_werewolf:
-            return self._bot.choose_victim(werewolves, candidates)
+            return self._bot.choose_victim(werewolves, candidates, transcript)
 
         key = f"night_kill_round_{self._round_getter()}"
         answer_id = st.session_state.get(key)
