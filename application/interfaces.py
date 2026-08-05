@@ -6,10 +6,20 @@ from domain.entities import ChatMessage, Player
 class WerewolfDecisionStrategy(Protocol):
     """Decides which villager the werewolves kill on a given night.
     Implementations may be random (bots) or prompt a human.
+
+    `transcript` is prior cross-round history (discussion, kills, votes) -
+    may be empty on night 1, when there's nothing to reason about yet.
+    Bot implementations aren't required to read it - a naive strategy can
+    ignore the parameter entirely - but a planning strategy should use it
+    to identify real threats (who's been vocal, who's accused the
+    werewolves) rather than picking blindly.
     """
 
     def choose_victim(
-        self, werewolves: List[Player], candidates: List[Player]
+        self,
+        werewolves: List[Player],
+        candidates: List[Player],
+        transcript: Optional[List[ChatMessage]] = None,
     ) -> Player: ...
 
 
@@ -82,3 +92,44 @@ class BackgroundKnowledgeProvider(Protocol):
     """
 
     def get_background(self, player: Player) -> str: ...
+
+
+class TurnSummaryStrategy(Protocol):
+    """Produces a short (2-3 sentence) natural-language recap of one
+    completed day/night turn - who accused/defended whom, who was voted
+    out, and what role they were revealed as. Saved to a TurnSummaryStore
+    so later rounds can recall what happened without needing the entire
+    raw transcript.
+    """
+
+    def summarize_turn(
+        self,
+        round_number: int,
+        transcript: List[ChatMessage],
+        eliminated_name: Optional[str],
+        eliminated_role: Optional[str],
+        votes: dict,
+        tied: bool,
+    ) -> str: ...
+
+
+class TurnSummaryStore(Protocol):
+    """Persists one short summary per completed round, under a game_id.
+
+    Deliberately separate from GameMemoryStore, which holds the full raw
+    transcript/event history: summaries exist specifically to back the
+    *restricted*-access tools that only let agents recall the previous
+    round (during a day-phase vote) or every round so far (during the
+    werewolves' night choice) - a compact recap, not the full unabridged
+    history GameMemoryStore provides.
+    """
+
+    def save_summary(self, game_id: str, round_number: int, summary: str) -> None: ...
+
+    def load_all_summaries(self, game_id: str) -> List[str]: ...
+
+    def load_previous_summary(
+        self, game_id: str, round_number: int
+    ) -> Optional[str]: ...
+
+    def clear(self, game_id: str) -> None: ...

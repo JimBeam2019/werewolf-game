@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_ollama import OllamaEmbeddings
 
-from application.session_states import initialize_params
+from infrastructure.session_states import initialize_params
 from application.discussion import DiscussionCoordinator
 from application.game_engine import GameEngine
 from application.setup import GameSetupService
@@ -23,11 +23,14 @@ from infrastructure.streamlit_adapter import (
 )
 from infrastructure.langchain_speak_strategy import LangChainSpeakStrategy
 from infrastructure.langgraph_memory import LangGraphMemoryStore
+from infrastructure.langgraph_werewolf_strategy import LangGraphWerewolfStrategy
 from infrastructure.load_file import initialize_knowledge_base
 from infrastructure.background_knowledge_provider import RAGBackgroundKnowledgeProvider
+from infrastructure.turn_summary_store import TurnSummaryStore
+from infrastructure.turn_summary_strategy import LangChainSummaryStrategy
 
 # from infrastructure.stub_speak_strategy import StubSpeakStrategy
-from infrastructure.transcript_vote_strategy import StubTranscriptVoteStrategy
+from infrastructure.transcript_vote_strategy import LangChainVoteStrategy
 
 load_dotenv()
 
@@ -61,11 +64,26 @@ embedding = (
         model=EMBEDDING_LLM_MODEL,
         api_key="EMPTY",  # type: ignore
         base_url=EMBEDDING_LLM_BASE_URL,
+        check_embedding_ctx_length=False,
     )
     if USE_VLLM
-    else OllamaEmbeddings(model=EMBEDDING_LLM_MODEL)
+    else OllamaEmbeddings(model=EMBEDDING_LLM_MODEL, dimensions=768)
 )
 vector_store = initialize_knowledge_base(DEFAULT_BOT_NAMES, embedding)
+
+
+def build_agent_llm(temperature: float = 0.8) -> ChatOpenAI:
+    """Shared construction for every LLM-backed bot (discussion, werewolf
+    planning, ...) - all point at the same local OpenAI-compatible
+    endpoint (e.g. Ollama's /v1 route), configured once via .env.
+    """
+    return ChatOpenAI(
+        model=AGENT_LLM_MODEL,
+        api_key="EMPTY",  # type: ignore
+        base_url=LLM_BASE_URL,
+        temperature=temperature,
+        max_retries=1,
+    )
 
 
 def ui_pref(key: str) -> bool:
@@ -89,16 +107,42 @@ def start_new_game(num_players: int, human_name: str) -> None:
         return
 
     human_id = players[0].id
+
+    # Set up per-game session state before constructing the strategies
+    # below, since some of them close over game_id/summary_store via
+    # lambdas bound at construction time - a fresh instance per game (not
+    # reused across "Play again" clicks) is also what satisfies "clear
+    # summaries between games": there's no old data to leak, because
+    # nothing here references the previous game's store anymore once
+    # this new one replaces it in session_state.
+    st.session_state.game_id = str(uuid.uuid4())
+    st.session_state.memory_store = LangGraphMemoryStore()
+    st.session_state.summary_store = TurnSummaryStore()
+    st.session_state.summary_strategy = LangChainSummaryStrategy(
+        build_agent_llm(temperature=0.5)
+    )
+
     # `holder` lets the strategies read the engine's *current* round number
     # even though the engine object doesn't exist yet when they're built.
     holder: dict = {}
     werewolf_strategy = StreamlitWerewolfStrategy(
-        human_id, lambda: holder["engine"].round_number
+        human_id,
+        lambda: holder["engine"].round_number,
+        bot_strategy=LangGraphWerewolfStrategy(
+            build_agent_llm(temperature=0.6),
+            summary_store=st.session_state.summary_store,
+            game_id_getter=lambda: st.session_state.game_id,
+        ),
     )
     vote_strategy = StreamlitVoteStrategy(
         human_id,
         lambda: holder["engine"].round_number,
-        bot_strategy=StubTranscriptVoteStrategy(),
+        bot_strategy=LangChainVoteStrategy(
+            build_agent_llm(temperature=0.6),
+            summary_store=st.session_state.summary_store,
+            game_id_getter=lambda: st.session_state.game_id,
+            round_getter=lambda: holder["engine"].round_number,
+        ),
     )
     notifier = BufferingNotifier()
 
@@ -128,8 +172,8 @@ def start_new_game(num_players: int, human_name: str) -> None:
     st.session_state.log = []
     st.session_state.pending = None
     st.session_state.discussion = None
-    st.session_state.game_id = str(uuid.uuid4())
-    st.session_state.memory_store = LangGraphMemoryStore()
+    # st.session_state.game_id = str(uuid.uuid4())
+    # st.session_state.memory_store = LangGraphMemoryStore()
 
 
 def _persist_system_messages(lines) -> None:
@@ -164,18 +208,11 @@ def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
         prior_history = st.session_state.memory_store.load_history(
             st.session_state.game_id
         )
-        llm = ChatOpenAI(
-            model=AGENT_LLM_MODEL,
-            api_key="EMPTY",  # type: ignore
-            base_url=LLM_BASE_URL,
-            temperature=0.8,
-            max_retries=1,
-        )
         discussion = DiscussionCoordinator(
             alive_players=engine.alive_players(),
             human_id=engine.human_id,
             # speak_strategy=StubSpeakStrategy(),
-            speak_strategy=LangChainSpeakStrategy(llm=llm),
+            speak_strategy=LangChainSpeakStrategy(llm=build_agent_llm()),
             budget_seconds=DISCUSSION_BUDGET_SECONDS,
             prior_history=prior_history,
         )
@@ -244,8 +281,11 @@ def advance_engine() -> None:
     while engine.result == GameResult.ONGOING:
         if engine.phase == GamePhase.NIGHT:
             engine.notifier.buffer.clear()  # type: ignore
+            prior_history = st.session_state.memory_store.load_history(
+                st.session_state.game_id
+            )
             try:
-                engine.run_night_phase()
+                engine.run_night_phase(transcript=prior_history)
             except PendingHumanDecision as pending:
                 st.session_state.pending = pending
                 return
@@ -261,7 +301,13 @@ def advance_engine() -> None:
 
             engine.notifier.buffer.clear()  # type: ignore
             try:
-                engine.run_day_phase(transcript=discussion.full_context())
+                # today's chat only, not full_context(): cross-round
+                # history now flows through the previous-turn-summary
+                # tool the vote strategy calls, not a raw transcript
+                # baked directly into its prompt.
+                day_result = engine.run_day_phase(
+                    transcript=discussion.snapshot_transcript()
+                )
             except PendingHumanDecision as pending:
                 st.session_state.pending = pending
                 return
@@ -274,6 +320,27 @@ def advance_engine() -> None:
                 st.session_state.game_id, discussion.snapshot_transcript()
             )
             _persist_system_messages(engine.notifier.buffer)  # type: ignore
+
+            # Summarize this completed turn before the next night starts,
+            # and save it - this is what get_previous_turn_summary (the
+            # day-vote tool) and get_all_turn_summaries (the werewolves'
+            # night-choice tool) draw on.
+            summary_text = st.session_state.summary_strategy.summarize_turn(
+                round_number=day_result.round_number,
+                transcript=discussion.snapshot_transcript(),
+                eliminated_name=(
+                    day_result.eliminated.name if day_result.eliminated else None
+                ),
+                eliminated_role=(
+                    day_result.eliminated.role.value if day_result.eliminated else None
+                ),
+                votes=day_result.votes,
+                tied=day_result.tied,
+            )
+            st.session_state.summary_store.save_summary(
+                st.session_state.game_id, day_result.round_number, summary_text
+            )
+
             st.session_state.pending = None
             st.session_state.discussion = None  # fresh coordinator next round
             continue
@@ -428,7 +495,7 @@ def _render_roster_cards(engine: GameEngine, human_id: int, night_vision: bool) 
     """Roster as a card grid. Same reveal rules as the list view - only the
     presentation changes.
     """
-    for i, p in enumerate(engine.players):
+    for _, p in enumerate(engine.players):
         reveal = (
             (not p.is_alive)
             or (p.id == human_id)
@@ -524,10 +591,23 @@ def render_game() -> None:
     # captured *before* rendering the transcript below, so a submitted
     # message is appended before this same run renders the discussion -
     # it shows up immediately instead of one rerun later.
-    if human.is_alive:
+    #
+    # Only shown during an actual active discussion: `discussion` here
+    # used to only be assigned inside the `elif` branch above (nested in
+    # col_main), so referencing it down here crashed with
+    # UnboundLocalError any time a message was sent outside that exact
+    # window (night phase, vote-pending, etc). Gating on the same
+    # condition that actually creates a discussion avoids that, and means
+    # there's no live input box to submit into when nothing's listening.
+    discussion_for_input = st.session_state.get("discussion")
+    if (
+        human.is_alive
+        and engine.phase == GamePhase.DAY
+        and discussion_for_input is not None
+    ):
         message = st.chat_input("Say something to the village...", max_chars=1000)
         if message:
-            discussion.add_human_message(human.name, message)
+            discussion_for_input.add_human_message(human.name, message)
             st.rerun()
 
     with col_right:

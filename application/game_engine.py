@@ -39,10 +39,10 @@ class GameEngine:
 
     players: List[Player]
     human_id: int
-    background_provider: BackgroundKnowledgeProvider
     werewolf_strategy: WerewolfDecisionStrategy
     vote_strategy: VoteDecisionStrategy
     notifier: Notifier
+    background_provider: Optional[BackgroundKnowledgeProvider] = None
     phase: GamePhase = GamePhase.NIGHT
     round_number: int = 1
     result: GameResult = GameResult.ONGOING
@@ -59,6 +59,13 @@ class GameEngine:
         return await self._run_async(self.background_provider.get_background, player)
 
     async def set_player_backgrounds(self) -> None:
+        """No-op when no background_provider was configured - e.g. the
+        CLI, or headless tests, which have no need for RAG-backed
+        personality profiles. Every player's `background` then just stays
+        at its default empty string.
+        """
+        if self.background_provider is None:
+            return
         tasks = []
         for player in self.players:
             if player.id != self.human_id:
@@ -83,14 +90,24 @@ class GameEngine:
         if self.result != GameResult.ONGOING:
             raise GameAlreadyEndedError("The game has already ended.")
 
-    def run_night_phase(self) -> NightResult:
-        """Werewolves collectively choose exactly one villager to kill."""
+    def run_night_phase(
+        self, transcript: Optional[List[ChatMessage]] = None
+    ) -> NightResult:
+        """Werewolves collectively choose exactly one villager to kill.
+
+        `transcript` is prior cross-round history, if any - passed
+        straight through to the werewolf strategy so a planning-based
+        strategy can target based on who's actually been dangerous to
+        them, rather than choosing blind.
+        """
         self._ensure_ongoing()
         self.notifier.notify(f"\n--- Night {self.round_number} ---")
 
         werewolves = self.alive_werewolves()
         candidates = self.alive_villagers()
-        victim = self.werewolf_strategy.choose_victim(werewolves, candidates)
+        victim = self.werewolf_strategy.choose_victim(
+            werewolves, candidates, transcript
+        )
         victim.kill()
         self.notifier.notify(f"{victim.name} was found dead this morning.")
 

@@ -11,7 +11,10 @@ class RandomWerewolfStrategy:
         self._rng = rng or random.Random()
 
     def choose_victim(
-        self, werewolves: List[Player], candidates: List[Player]
+        self,
+        werewolves: List[Player],
+        candidates: List[Player],
+        transcript: Optional[List[ChatMessage]] = None,
     ) -> Player:
         return self._rng.choice(candidates)
 

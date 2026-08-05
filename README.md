@@ -27,7 +27,7 @@ uv venv
 
 3. Create a new `.env` environment file using a environment template `.env.example` and fill all the variables based on your choice. The below can be your reference.
 
-```python
+```env
 USE_VLLM=False
 AGENT_LLM_MODEL=llama3.2:3b
 LLM_BASE_URL=http://localhost:11434/v1
@@ -63,7 +63,7 @@ uv venv
 
 3. Create a new `.env` environment file using a environment template `.env.example` and fill all the variables based on your choice. The below can be your reference.
 
-```python
+```env
 USE_VLLM=True
 AGENT_LLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct
 LLM_BASE_URL=http://localhost:8000/v1
@@ -82,7 +82,7 @@ vllm serve Qwen/Qwen3-Embedding-0.6B --port 8001 --runner pooling --gpu-memory-u
 5. Run `Streamlit` with the cli below.
 
 ```bash
-streamlit run test.py --server.address 0.0.0.0 --server.port 8501 --server.baseUrlPath ""
+streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501 --server.baseUrlPath ""
 ```
 
 6. Expose RC Tunnel

@@ -20,13 +20,16 @@ class HumanVsBotWerewolfStrategy:
         self._bot = RandomWerewolfStrategy()
 
     def choose_victim(
-        self, werewolves: List[Player], candidates: List[Player]
+        self,
+        werewolves: List[Player],
+        candidates: List[Player],
+        transcript: Optional[List[ChatMessage]] = None,
     ) -> Player:
         if self._human_player_id is not None and any(
             w.id == self._human_player_id for w in werewolves
         ):
-            return self._console.choose_victim(werewolves, candidates)
-        return self._bot.choose_victim(werewolves, candidates)
+            return self._console.choose_victim(werewolves, candidates, transcript)
+        return self._bot.choose_victim(werewolves, candidates, transcript)
 
 
 class HumanVsBotVoteStrategy:
