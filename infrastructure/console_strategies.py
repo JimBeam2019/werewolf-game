@@ -20,7 +20,10 @@ class ConsoleWerewolfStrategy:
     """
 
     def choose_victim(
-        self, werewolves: List[Player], candidates: List[Player]
+        self,
+        werewolves: List[Player],
+        candidates: List[Player],
+        transcript: Optional[List[ChatMessage]] = None,
     ) -> Player:
         names = ", ".join(w.name for w in werewolves)
         return _prompt_choice(f"\n[Werewolves: {names}] Choose a victim:", candidates)

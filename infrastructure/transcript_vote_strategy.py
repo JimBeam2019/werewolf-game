@@ -1,9 +1,11 @@
 import random
-from typing import List, Optional
+from typing import Callable, List, Optional
 
+from langchain_core.language_models import BaseChatModel
 from langchain.agents import create_agent
-from langgraph.checkpoint.memory import InMemorySaver
 from domain.entities import ChatMessage, Player
+from infrastructure.memory_tools import build_vote_memory_tools
+from infrastructure.turn_summary_store import TurnSummaryStore
 
 
 class StubTranscriptVoteStrategy:
@@ -44,17 +46,36 @@ class StubTranscriptVoteStrategy:
 
 
 class LangChainVoteStrategy:
-    """Casts a day-phase vote by asking an LLM to reason over the
-    discussion transcript, rather than voting randomly or by mention-count.
+    """Casts a day-phase vote via a tool-calling LLM agent, rather than
+    baking the whole transcript directly into the prompt.
 
-    Falls back to a random eligible candidate if the model's reply doesn't
-    clearly match a candidate's name - this keeps the game from breaking
-    if a smaller/quantized local model produces a slightly off-format
-    answer.
+    Access here is a deliberate, real restriction, not just a prompt
+    instruction to "only consider recent context": the voting agent can
+    see *only* what it gets back from calling get_previous_turn_summary()
+    (last round's recap - not the full game history) and
+    get_recent_chat_messages() (the last 6 messages of *today's*
+    discussion only). Anything beyond that literally isn't in its
+    context, because it was never handed the raw transcript at all -
+    only the tools that expose these two narrow slices of it.
+
+    `transcript`, per the shared VoteDecisionStrategy protocol, is
+    expected to be *today's* discussion only (not cross-round history -
+    that's what get_previous_turn_summary is for); it's sliced down to
+    the last 6 messages when building the tools.
     """
 
-    def __init__(self, llm, rng: Optional[random.Random] = None):
+    def __init__(
+        self,
+        llm: BaseChatModel,
+        summary_store: TurnSummaryStore,
+        game_id_getter: Callable[[], str],
+        round_getter: Callable[[], int],
+        rng: Optional[random.Random] = None,
+    ):
         self._llm = llm
+        self._summary_store = summary_store
+        self._game_id_getter = game_id_getter
+        self._round_getter = round_getter
         self._rng = rng or random.Random()
 
     def cast_vote(
@@ -65,34 +86,32 @@ class LangChainVoteStrategy:
     ) -> Player:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        candidate_names = ", ".join(c.name for c in candidates)
-        conversation = (
-            "\n".join(f"{m.speaker_name}: {m.content}" for m in transcript)
-            if transcript
-            else "(no discussion took place)"
+        previous_summary = self._summary_store.load_previous_summary(
+            self._game_id_getter(), self._round_getter()
         )
+        tools = build_vote_memory_tools(previous_summary, transcript or [])
+
+        candidate_names = ", ".join(c.name for c in candidates)
         system = SystemMessage(
             content=(
                 f"You are {voter.name}, playing Werewolf as a {voter.role.value}. "
-                f"Based on the discussion below, vote to eliminate the player you "
+                "Use the available tools to recall what happened last round and "
+                "what's been said today, then vote to eliminate the player you "
                 f"most suspect is a werewolf. Eligible candidates: {candidate_names}. "
                 "Reply with ONLY the candidate's name, nothing else."
             )
         )
-        human = HumanMessage(content=conversation)
+        human = HumanMessage(content="Decide who to vote for.")
 
-        agent = create_agent(
-            model=self._llm,
-            system_prompt=system,
-            checkpointer=InMemorySaver(),
-        )
-        response = agent.invoke({"messages": [human]})
-        reply = response["messages"][-1].content
-
-        # response = self._llm.invoke([system, human])
-        # reply = (
-        #     response.content if hasattr(response, "content") else str(response)
-        # ).strip()
+        agent = create_agent(model=self._llm, system_prompt=system, tools=tools)
+        try:
+            response = agent.invoke({"messages": [human]})
+            reply = response["messages"][-1].content
+        except Exception:
+            # Any failure talking to the model (connection error, timeout,
+            # malformed response, etc.) degrades to a random vote rather
+            # than propagating and taking down the whole day phase.
+            return self._rng.choice(candidates)
 
         for candidate in candidates:
             if candidate.name.lower() in reply.lower():

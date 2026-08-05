@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from typing import List
 
@@ -12,7 +13,7 @@ class AlwaysKillFirstStrategy:
     """Deterministic werewolf strategy: always kills the first candidate."""
 
     def choose_victim(
-        self, werewolves: List[Player], candidates: List[Player]
+        self, werewolves: List[Player], candidates: List[Player], transcript=None
     ) -> Player:
         return candidates[0]
 
