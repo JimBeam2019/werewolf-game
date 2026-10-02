@@ -56,6 +56,7 @@ class AgentSpeakStrategy(Protocol):
         speaker: Player,
         transcript: List[ChatMessage],
         alive_players: List[Player],
+        known_facts: str = "",
     ) -> str: ...
 
 

@@ -59,6 +59,13 @@ class DiscussionCoordinator:
     the two for anything that needs the complete picture.
     """
 
+    known_facts: str = ""
+    """What's actually publicly known so far this game - which eliminated
+    players' roles were revealed (day votes) vs. not (night kills). Computed
+    once via build_known_facts() when the discussion starts, then handed to
+    every bot's turn unchanged - this is what stops agents from inventing a
+    role reveal for someone who was killed at night."""
+
     transcript: List[ChatMessage] = field(default_factory=list)
     start_time: Optional[float] = None
 
@@ -213,7 +220,9 @@ class DiscussionCoordinator:
                 transcript, alive = self._snapshot_for_agent()
 
                 try:
-                    content = await self.speak_strategy.speak(player, transcript, alive)
+                    content = await self.speak_strategy.speak(
+                        player, transcript, alive, self.known_facts
+                    )
                     await queue.put((player.name, content))
                 except Exception as exc:
                     await queue.put(

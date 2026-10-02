@@ -11,6 +11,7 @@ from infrastructure.session_states import initialize_params
 from application.discussion import DiscussionCoordinator
 from application.game_engine import GameEngine
 from application.setup import GameSetupService
+from application.known_facts import build_known_facts
 from domain.entities import ChatMessage
 from domain.enums import GamePhase, GameResult, Role
 from domain.exceptions import GameError
@@ -83,6 +84,11 @@ def build_agent_llm(temperature: float = 0.8) -> ChatOpenAI:
         base_url=LLM_BASE_URL,
         temperature=temperature,
         max_retries=1,
+        frequency_penalty=0.4,
+        presence_penalty=0.4,
+        extra_body={
+            "repetition_penalty": 1.15,
+        },
     )
 
 
@@ -212,9 +218,10 @@ def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
             alive_players=engine.alive_players(),
             human_id=engine.human_id,
             # speak_strategy=StubSpeakStrategy(),
-            speak_strategy=LangChainSpeakStrategy(llm=build_agent_llm()),
+            speak_strategy=LangChainSpeakStrategy(llm=build_agent_llm(temperature=0.8)),
             budget_seconds=DISCUSSION_BUDGET_SECONDS,
             prior_history=prior_history,
+            known_facts=build_known_facts(engine.history),
         )
         discussion.start()
         st.session_state.discussion = discussion
@@ -224,7 +231,7 @@ def get_or_start_discussion(engine: GameEngine) -> DiscussionCoordinator:
 def reset_game() -> None:
     # Keep ui_* display preferences across games; everything else goes.
     for key in list(st.session_state.keys()):
-        if not key.startswith("ui_"):
+        if not key.startswith("ui_"):  # type: ignore
             del st.session_state[key]
 
 
