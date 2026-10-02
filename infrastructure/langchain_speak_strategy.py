@@ -1,3 +1,5 @@
+import re
+
 from typing import List
 
 from langchain_core.language_models import BaseChatModel
@@ -88,6 +90,37 @@ def _shorten(text: str) -> str:
     return shortened
 
 
+# def _strip_leading_speaker_label(content: str, speaker_name: str) -> str:
+#     """Small/quantized models often imitate the 'Name: message' pattern
+#     they're shown in the transcript, prefixing their own name onto their
+#     reply. Since we *also* prepend the speaker's name when rendering, this
+#     produces "Frank: Frank: message". Strip it deterministically rather
+#     than relying on the model reliably following an instruction not to.
+#     """
+#     pattern = rf"^\s*{re.escape(speaker_name)}\s*:\s*"
+#     return re.sub(pattern, "", content, count=1, flags=re.IGNORECASE)
+
+
+_NAME_PREFIX_PATTERN = re.compile(r"^\s*[\w'\- ]{1,20}:\s*")
+
+
+def _clean_agent_reply(raw_content: str) -> str:
+    """Small/quantized models often don't stop after their own single
+    line - they keep predicting the 'Name: message' transcript format
+    they were shown, sometimes generating several more turns, including
+    ones attributed to OTHER characters. Two backstops, since prompting
+    alone isn't reliable:
+      1. Keep only the first generated line - anything after a newline
+         is the model continuing past what was actually asked for.
+      2. Strip any leading "Name:" label from that line - not just the
+         current speaker's own name, since the model may mislabel its
+         line with a different character's name entirely.
+    """
+    stripped = raw_content.strip()
+    first_line = stripped.splitlines()[0] if stripped else ""
+    return _NAME_PREFIX_PATTERN.sub("", first_line, count=1)
+
+
 class LangChainSpeakStrategy:
     """Produces one discussion-phase message by prompting an LLM.
 
@@ -115,6 +148,7 @@ class LangChainSpeakStrategy:
         speaker: Player,
         transcript: List[ChatMessage],
         alive_players: List[Player],
+        known_facts: str = "",
     ) -> str:
         others = ", ".join(p.name for p in alive_players if p.id != speaker.id)
         system = SystemMessage(
@@ -124,14 +158,21 @@ class LangChainSpeakStrategy:
                 f"{others}.\n\n"
                 "Your background knowledge:\n"
                 f"{speaker.background}\n\n"
+                "Known facts so far - only state a player's role if it's listed "
+                "here as revealed. Never claim to know an unrevealed player's "
+                f"role, even if you suspect it:\n{known_facts}\n\n"
                 "Talk like a real person texting in a group chat during a fast-paced "
                 "game - casual, short, a little blunt. NOT like a formal writer.\n\n"
                 "Hard rules:\n"
+                "- Speak in first person as yourself - use 'I', never refer to yourself as "
+                f"'{speaker.name}' in the third person.\n"
                 "- ONE short sentence. Under 15 words.\n"
                 '- No greetings, no restating the situation, no "I believe that..." '
                 'or "In my opinion..." openers.\n'
                 "- Contractions are good: dunno, gonna, yeah, nah.\n"
                 "- Never reveal your own role.\n\n"
+                f"- You may only suspect or accuse players from this list: {others}. "
+                "- Never suspect, accuse, or cast doubt on yourself."
                 "Good examples: \"nah I don't buy it, Bob's been dodging questions\" / "
                 '"wait why\'s everyone so quiet" / "still think it\'s Carol tbh" / '
                 '"same, sketchy energy from Dave"\n'
@@ -144,6 +185,7 @@ class LangChainSpeakStrategy:
         conversation = "\n".join(f"{m.speaker_name}: {m.content}" for m in recent)
         human = HumanMessage(content=conversation or "The discussion has just begun.")
 
-        response = await self._llm.ainvoke([system, human])
+        response = await self._llm.ainvoke([system, human], stop=["\n"])
         content = response.content if hasattr(response, "content") else str(response)
-        return _shorten(content)  # type: ignore
+        message = _shorten(content)  # type: ignore
+        return _clean_agent_reply(message)
